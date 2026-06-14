@@ -1,6 +1,6 @@
 'use client';
 
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import samplePack from '@/data/examples/hs915_test_run_01_strategy_pack.json';
 import { rolePermissions } from '@/lib/defaults';
 import type { AssetRecord, ClaimRiskLevel, Direction, QARecord, ReferenceRole, SourceType, StrategyPack } from '@/types/workflow';
@@ -339,6 +339,10 @@ function AssetUploader({ selectedDirection, onAddAsset }: { selectedDirection: D
   const [role, setRole] = useState<ReferenceRole>('product_truth_reference');
   const [risk, setRisk] = useState<ClaimRiskLevel>('unknown');
   const [scope, setScope] = useState(selectedDirection.directionId);
+
+  useEffect(() => {
+    setScope(selectedDirection.directionId);
+  }, [selectedDirection.directionId]);
 
   return (
     <div className="rounded-2xl bg-zinc-50 p-4">

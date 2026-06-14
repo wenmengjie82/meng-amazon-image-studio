@@ -32,5 +32,3 @@ export const rolePermissions: Record<ReferenceRole, { title: string; allowedUse:
     forbiddenUse: 'Do not use as positive prompt, claim source, or product truth.'
   }
 };
-
-export const disallowedResultLabels = ['final_pass', 'commercial_pass', 'listing_ready', 'approved_for_amazon'];
