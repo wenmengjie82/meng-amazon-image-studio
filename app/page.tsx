@@ -3,11 +3,21 @@
 import { useEffect, useMemo, useState } from 'react';
 import samplePack from '@/data/examples/hs915_test_run_01_strategy_pack.json';
 import { rolePermissions } from '@/lib/defaults';
+import type {
+  AssetManifestItem,
+  GenerationMode,
+  GenerationRecord,
+  ImageGenerationOutput
+} from '@/lib/image-provider/types';
 import type { AssetRecord, ClaimRiskLevel, Direction, QARecord, ReferenceRole, SourceType, StrategyPack } from '@/types/workflow';
 
 const sourceTypes: SourceType[] = ['own_product', 'competitor', 'brand_style', 'risk_example'];
 const roles = Object.keys(rolePermissions) as ReferenceRole[];
 const riskLevels: ClaimRiskLevel[] = ['low', 'medium', 'high', 'unknown'];
+
+type GenerateApiResponse =
+  | { ok: true; result: ImageGenerationOutput }
+  | { ok: false; error: { code: string; message: string } };
 
 function makeInitialQA(pack: StrategyPack): Record<string, QARecord> {
   return Object.fromEntries(
@@ -15,11 +25,23 @@ function makeInitialQA(pack: StrategyPack): Record<string, QARecord> {
       direction.directionId,
       {
         directionId: direction.directionId,
-        generationStatus: 'not_generated',
         result: 'not_generated',
         checks: Object.fromEntries(direction.qaChecklist.map((check) => [check, false])),
         mainProblem: '',
         nextAction: ''
+      }
+    ])
+  );
+}
+
+function makeInitialGenerations(pack: StrategyPack): Record<string, GenerationRecord> {
+  return Object.fromEntries(
+    pack.directions.map((direction) => [
+      direction.directionId,
+      {
+        directionId: direction.directionId,
+        mode: 'mock',
+        status: 'not_generated'
       }
     ])
   );
@@ -51,6 +73,7 @@ export default function HomePage() {
   const [selectedDirectionId, setSelectedDirectionId] = useState(pack.directions[0]?.directionId ?? '');
   const [assets, setAssets] = useState<AssetRecord[]>([]);
   const [qa, setQa] = useState<Record<string, QARecord>>(makeInitialQA(pack));
+  const [generations, setGenerations] = useState<Record<string, GenerationRecord>>(makeInitialGenerations(pack));
   const [packStatus, setPackStatus] = useState('Loaded sample HS-915 strategy pack.');
 
   const selectedDirection = useMemo(
@@ -59,6 +82,7 @@ export default function HomePage() {
   );
 
   const activeQa = selectedDirection ? qa[selectedDirection.directionId] : undefined;
+  const activeGeneration = selectedDirection ? generations[selectedDirection.directionId] : undefined;
 
   function loadSample() {
     const nextPack = samplePack as StrategyPack;
@@ -66,6 +90,7 @@ export default function HomePage() {
     setPackText(JSON.stringify(nextPack, null, 2));
     setSelectedDirectionId(nextPack.directions[0]?.directionId ?? '');
     setQa(makeInitialQA(nextPack));
+    setGenerations(makeInitialGenerations(nextPack));
     setPackStatus('Loaded sample HS-915 strategy pack.');
   }
 
@@ -83,6 +108,7 @@ export default function HomePage() {
       setPack(parsed);
       setSelectedDirectionId(parsed.directions[0].directionId);
       setQa(makeInitialQA(parsed));
+      setGenerations(makeInitialGenerations(parsed));
       setPackStatus('Strategy pack imported and validated.');
     } catch (error) {
       setPackStatus(error instanceof Error ? `Invalid strategy pack: ${error.message}` : 'Invalid strategy pack.');
@@ -116,17 +142,78 @@ export default function HomePage() {
     }));
   }
 
-  function markMockGenerated() {
-    if (!selectedDirection || !activeQa) return;
-    setQa((current) => ({
+  function setGenerationMode(mode: GenerationMode) {
+    if (!selectedDirection || !activeGeneration || activeGeneration.status === 'generating') return;
+    setGenerations((current) => ({
       ...current,
       [selectedDirection.directionId]: {
-        ...activeQa,
-        generationStatus: 'mock_generated',
-        result: 'structure_test_fail',
-        nextAction: activeQa.nextAction || 'Complete QA review before marking structure_test_pass.'
+        directionId: selectedDirection.directionId,
+        mode,
+        status: 'not_generated'
       }
     }));
+  }
+
+  async function generateImage() {
+    if (!selectedDirection || !activeGeneration || activeGeneration.status === 'generating') return;
+    const directionId = selectedDirection.directionId;
+    const mode = activeGeneration.mode;
+    const assetManifest: AssetManifestItem[] = assets
+      .filter((asset) => !asset.blocked)
+      .filter((asset) => asset.directionScope === directionId || asset.directionScope === 'all')
+      .map(({ previewUrl, ...asset }) => ({
+        ...asset,
+        blocked: Boolean(asset.blocked)
+      }));
+
+    setGenerations((current) => ({
+      ...current,
+      [directionId]: {
+        directionId,
+        mode,
+        status: 'generating',
+        message: `${mode === 'real' ? 'Real' : 'Mock'} generation is running.`
+      }
+    }));
+
+    try {
+      const response = await fetch('/api/generate', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          directionId,
+          finalGenerationPrompt: selectedDirection.finalGenerationPrompt,
+          negativePrompt: selectedDirection.negativePrompt,
+          assetManifest,
+          generationMode: mode
+        })
+      });
+      const payload = (await response.json()) as GenerateApiResponse;
+      if (!response.ok || !payload.ok) {
+        const apiError = payload.ok ? null : payload.error;
+        throw new Error(apiError ? `${apiError.code}: ${apiError.message}` : `Generation failed with status ${response.status}.`);
+      }
+
+      setGenerations((current) => ({
+        ...current,
+        [directionId]: {
+          ...payload.result
+        }
+      }));
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Image generation failed.';
+      const separator = message.indexOf(':');
+      setGenerations((current) => ({
+        ...current,
+        [directionId]: {
+          directionId,
+          mode,
+          status: 'generation_failed',
+          errorCode: separator > 0 ? message.slice(0, separator) : 'IMAGE_GENERATION_FAILED',
+          message: separator > 0 ? message.slice(separator + 1).trim() : message
+        }
+      }));
+    }
   }
 
   function exportDelivery() {
@@ -138,7 +225,17 @@ export default function HomePage() {
       .join('\n\n');
     const qaSheet = JSON.stringify(qa, null, 2);
     const assetManifest = JSON.stringify(assets.map(({ previewUrl, ...asset }) => asset), null, 2);
-    const bundle = `# Delivery Pack\n\n## strategy_pack.json\n\n\`\`\`json\n${JSON.stringify(pack, null, 2)}\n\`\`\`\n\n## generation_prompts.md\n\n${generationPrompts}\n\n## upload_checklist.md\n\n${uploadChecklist}\n\n## qa_sheet.json\n\n\`\`\`json\n${qaSheet}\n\`\`\`\n\n## asset_manifest.json\n\n\`\`\`json\n${assetManifest}\n\`\`\`\n`;
+    const generationResults = JSON.stringify(
+      Object.fromEntries(
+        Object.entries(generations).map(([directionId, { imageDataUrl, ...record }]) => [
+          directionId,
+          { ...record, imageIncludedInExport: Boolean(imageDataUrl) }
+        ])
+      ),
+      null,
+      2
+    );
+    const bundle = `# Delivery Pack\n\n## strategy_pack.json\n\n\`\`\`json\n${JSON.stringify(pack, null, 2)}\n\`\`\`\n\n## generation_prompts.md\n\n${generationPrompts}\n\n## upload_checklist.md\n\n${uploadChecklist}\n\n## generation_results.json\n\n\`\`\`json\n${generationResults}\n\`\`\`\n\n## qa_sheet.json\n\n\`\`\`json\n${qaSheet}\n\`\`\`\n\n## asset_manifest.json\n\n\`\`\`json\n${assetManifest}\n\`\`\`\n`;
     downloadText('strategy_pack_delivery_pack.md', bundle, 'text/markdown');
   }
 
@@ -178,6 +275,7 @@ export default function HomePage() {
             <div className="space-y-2">
               {pack.directions.map((direction) => {
                 const record = qa[direction.directionId];
+                const generation = generations[direction.directionId];
                 return (
                   <button
                     key={direction.directionId}
@@ -187,6 +285,7 @@ export default function HomePage() {
                     <div className="font-semibold">{direction.directionName}</div>
                     <div className="mt-1 text-xs text-zinc-600">{direction.targetPlacement}</div>
                     <div className="mt-2 text-xs font-semibold text-[#8b3f65]">{record?.result ?? 'not_generated'}</div>
+                    <div className="mt-1 text-xs text-zinc-500">Generation: {generation?.status ?? 'not_generated'}</div>
                   </button>
                 );
               })}
@@ -195,7 +294,7 @@ export default function HomePage() {
         </aside>
 
         <div className="space-y-6">
-          {selectedDirection && activeQa ? (
+          {selectedDirection && activeQa && activeGeneration ? (
             <>
               <Panel title="3. Direction Workspace">
                 <div className="grid gap-4 md:grid-cols-2">
@@ -212,9 +311,44 @@ export default function HomePage() {
                   <h3 className="font-semibold text-red-900">Negative Prompt / Hard Restrictions</h3>
                   <p className="mt-2 whitespace-pre-wrap text-sm text-red-800">{selectedDirection.negativePrompt}</p>
                 </div>
-                <div className="mt-4 flex gap-2">
-                  <button onClick={markMockGenerated} className="rounded-xl bg-[#c76c95] px-4 py-2 text-sm font-semibold text-white">Mock Generate</button>
+                <div className="mt-4 grid gap-3 md:grid-cols-[220px_auto_1fr] md:items-end">
+                  <label className="text-sm font-semibold">
+                    Generation Mode
+                    <select
+                      className="mt-2 w-full rounded-xl border border-zinc-300 p-2"
+                      value={activeGeneration.mode}
+                      disabled={activeGeneration.status === 'generating'}
+                      onChange={(event) => setGenerationMode(event.target.value as GenerationMode)}
+                    >
+                      <option value="mock">mock</option>
+                      <option value="real">real</option>
+                    </select>
+                  </label>
+                  <button
+                    onClick={generateImage}
+                    disabled={activeGeneration.status === 'generating'}
+                    className="rounded-xl bg-[#c76c95] px-4 py-2 text-sm font-semibold text-white disabled:cursor-not-allowed disabled:opacity-60"
+                  >
+                    {activeGeneration.status === 'generating' ? 'Generating...' : 'Generate'}
+                  </button>
                   <button onClick={() => downloadText(`${selectedDirection.directionId}_prompt.txt`, `${selectedDirection.finalGenerationPrompt}\n\nNEGATIVE:\n${selectedDirection.negativePrompt}`)} className="rounded-xl border border-zinc-300 px-4 py-2 text-sm font-semibold">Copy/Download Prompt</button>
+                </div>
+                <div className={`mt-4 rounded-2xl border p-4 ${activeGeneration.status === 'generation_failed' ? 'border-red-300 bg-red-50' : 'border-zinc-200 bg-white'}`}>
+                  <div className="flex flex-wrap items-center gap-2">
+                    <h3 className="font-semibold">Generation Result</h3>
+                    <span className="rounded-full bg-zinc-100 px-2 py-1 text-xs font-semibold">{activeGeneration.mode}</span>
+                    <span className="rounded-full bg-zinc-100 px-2 py-1 text-xs font-semibold">{activeGeneration.status}</span>
+                  </div>
+                  {activeGeneration.message ? <p className="mt-2 text-sm text-zinc-700">{activeGeneration.message}</p> : null}
+                  {activeGeneration.errorCode ? <p className="mt-1 text-xs font-semibold text-red-800">Error: {activeGeneration.errorCode}</p> : null}
+                  {activeGeneration.imageDataUrl ? (
+                    <img
+                      src={activeGeneration.imageDataUrl}
+                      alt={`${selectedDirection.directionName} generated test result`}
+                      className="mt-4 max-h-[560px] w-full rounded-2xl object-contain"
+                    />
+                  ) : null}
+                  <p className="mt-3 text-xs text-zinc-500">Generation never changes QA automatically. A human reviewer must complete the QA Gate.</p>
                 </div>
               </Panel>
 
@@ -256,7 +390,7 @@ export default function HomePage() {
                     </label>
                   ))}
                 </div>
-                <div className="mt-4 grid gap-4 md:grid-cols-2">
+                <div className="mt-4">
                   <label className="text-sm font-semibold">
                     QA Result
                     <select
@@ -269,18 +403,8 @@ export default function HomePage() {
                       <option value="structure_test_fail">structure_test_fail</option>
                     </select>
                   </label>
-                  <label className="text-sm font-semibold">
-                    Generation Status
-                    <select
-                      className="mt-2 w-full rounded-xl border border-zinc-300 p-2"
-                      value={activeQa.generationStatus}
-                      onChange={(event) => setQa((current) => ({ ...current, [selectedDirection.directionId]: { ...activeQa, generationStatus: event.target.value as QARecord['generationStatus'] } }))}
-                    >
-                      <option value="not_generated">not_generated</option>
-                      <option value="mock_generated">mock_generated</option>
-                    </select>
-                  </label>
                 </div>
+                <p className="mt-3 text-xs text-zinc-500">QA remains manual even after mock or real generation.</p>
                 <textarea
                   className="mt-4 h-20 w-full rounded-xl border border-zinc-300 p-3 text-sm"
                   placeholder="main_problem"
@@ -296,7 +420,7 @@ export default function HomePage() {
               </Panel>
 
               <Panel title="7. Delivery Export">
-                <p className="text-sm text-zinc-600">Exports Markdown with strategy pack, prompts, upload checklist, QA sheet, and asset manifest. ZIP export and real image generation can be added later.</p>
+                <p className="text-sm text-zinc-600">Exports Markdown with strategy pack, prompts, upload checklist, generation mode/results, QA sheet, and asset manifest. Generated base64 image data is intentionally excluded.</p>
                 <button onClick={exportDelivery} className="mt-3 rounded-xl bg-[#2c2433] px-4 py-2 text-sm font-semibold text-white">Export Delivery Markdown</button>
               </Panel>
             </>

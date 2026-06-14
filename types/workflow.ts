@@ -58,7 +58,6 @@ export interface AssetRecord {
 
 export interface QARecord {
   directionId: string;
-  generationStatus: 'not_generated' | 'mock_generated';
   result: QAResult;
   checks: Record<string, boolean>;
   mainProblem: string;

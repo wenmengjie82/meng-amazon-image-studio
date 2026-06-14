@@ -12,7 +12,7 @@ Strategy-Pack Image Studio turns a prepared image strategy pack into controlled 
 2. Select an image direction.
 3. Upload assets with explicit roles.
 4. Preview the generation prompt and negative prompt.
-5. Run mock generation or copy the prompt to an image tool.
+5. Run mock generation or call a server-side image provider.
 6. Complete a QA Gate.
 7. Export delivery files for review and project closure.
 
@@ -83,6 +83,21 @@ Then open:
 http://localhost:3000
 ```
 
+Mock generation is the default and does not require credentials.
+
+For real generation, copy the variable names from `.env.example` into `.env.local` and provide a server-side API key:
+
+```text
+OPENAI_API_KEY=your_server_side_key
+OPENAI_IMAGE_MODEL=gpt-image-2
+OPENAI_IMAGE_SIZE=1024x1024
+OPENAI_IMAGE_QUALITY=low
+```
+
+Never use a `NEXT_PUBLIC_` prefix for the API key. The browser calls `/api/generate`; only the server adapter calls the external image provider.
+
+The v0.2 adapter sends the Strategy Pack prompt contract and governed asset metadata. It does not yet upload local image bytes to the provider.
+
 ## Sample pack
 
 The sample strategy pack is stored at:
@@ -98,7 +113,7 @@ It includes two first-round test directions:
 
 ## Deployment notes
 
-This MVP is safe to deploy on Vercel. It uses browser state and mock generation only. Real image generation API integration should be added later through a protected API route.
+This MVP is safe to deploy on Vercel. It uses browser state and a protected `/api/generate` route. Configure server-side environment variables in the deployment platform before enabling real generation.
 
 ## Acceptance criteria
 
@@ -109,7 +124,9 @@ The MVP passes if:
 3. User can upload assets with explicit roles.
 4. System blocks competitor images from product truth role.
 5. User can preview prompt and negative prompt.
-6. User can mark generation as `not_generated` or `mock_generated`.
-7. User can complete QA Gate.
-8. User can export or copy delivery files.
-9. No `final_pass`, `commercial_pass`, `listing_ready`, or `approved_for_amazon` labels are used.
+6. Mock generation works without credentials.
+7. Real generation reports a clear error when the server API key is missing.
+8. Generation never marks QA as passed or failed automatically.
+9. User can complete QA Gate manually.
+10. User can export generation mode/results with delivery files.
+11. No final commercial approval labels are used.
